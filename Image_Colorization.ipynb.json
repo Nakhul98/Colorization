@@ -1,0 +1,569 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "cXYbyrR9z36G"
+   },
+   "source": [
+    "# Grayscale Image Converstion\n",
+    "Zhang et al. –– https://link.springer.com/chapter/10.1007%2F978-3-319-46487-9_40 <br />\n",
+    "Luke Melas dataset –– https://lukemelas.github.io/image-colorization.html"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "id": "R7fgae9vqGRN"
+   },
+   "outputs": [],
+   "source": [
+    "# Add official website of pytorch\n",
+    "import torch\n",
+    "import torch.nn as nn\n",
+    "import torch.optim as optim\n",
+    "from torch.utils.data import DataLoader\n",
+    "from torch.utils.data import sampler\n",
+    "\n",
+    "import torchvision.datasets as dset\n",
+    "import torchvision.transforms as T\n",
+    "from torch.autograd import Variable\n",
+    "from torchvision import datasets, transforms\n",
+    "import torchvision.models as models\n",
+    "import torch.nn.functional as F\n",
+    "\n",
+    "import numpy as np\n",
+    "import sys\n",
+    "import os, time, shutil, argparse\n",
+    "\n",
+    "import matplotlib.pyplot as plt\n",
+    "from skimage.color import rgb2lab, rgb2gray, lab2rgb\n",
+    "plt.switch_backend('agg')\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "sGg8u7rkwhMT"
+   },
+   "source": [
+    "# Download and Build Dataset <br />\n",
+    "Using the MIT database for LAB images, we import 40,000 training images and 1,000 testing and validation images\n",
+    "\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "yIvmOgX7wf4b",
+    "outputId": "1f1723c3-160b-4dab-f10f-aac599615f05"
+   },
+   "outputs": [],
+   "source": [
+    "# # %cd / Kaggle\n",
+    "# !wget http://data.csail.mit.edu/places/places205/testSetPlaces205_resize.tar.gz\n",
+    "\n",
+    "# !tar -xzf testSetPlaces205_resize.tar.gz\n",
+    "\n",
+    "\n",
+    "# # Move data into training and validation directories\n",
+    "# print('MOVING DIRECTORIES')\n",
+    "\n",
+    "# os.makedirs('images/train/class/', exist_ok=True) # 40,000 images\n",
+    "# os.makedirs('images/val/class/', exist_ok=True)   #  1,000 images\n",
+    "\n",
+    "# for i, file in enumerate(os.listdir('testSet_resize')):\n",
+    "#   if i < 1000: # first 1000 will be val\n",
+    "#       os.rename('testSet_resize/' + file, 'images/val/class/' + file)\n",
+    "#   else: # others will be val\n",
+    "#       os.rename('testSet_resize/' + file, 'images/train/class/' + file)\n",
+    "# print('done')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "3E_adYzYxul9",
+    "outputId": "4685f953-430f-4c8b-c3cf-65792dfab378"
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "using device: cuda\n"
+     ]
+    }
+   ],
+   "source": [
+    "USE_GPU = True\n",
+    "\n",
+    "dtype = torch.float32 # we will be using float throughout this tutorial\n",
+    "\n",
+    "if USE_GPU and torch.cuda.is_available():\n",
+    "    device = torch.device('cuda')\n",
+    "else:\n",
+    "    device = torch.device('cpu')\n",
+    "\n",
+    "# Constant to control how frequently we print train loss\n",
+    "print_every = 100\n",
+    "\n",
+    "print('using device:', device)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "u9t12IaF7zlE"
+   },
+   "source": [
+    "# Run Transformations, Grayscale Converter, and DataLoader  <br />\n",
+    "### For this grayscale dataset, run a random horizontal flip\n",
+    "Note: The torchvision.transforms package provides tools for preprocessing data\n",
+    "and for performing data augmentation; here we set up a transform to\n",
+    "preprocess the data by flipping images at random inxedes.\n",
+    "\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "MOxjurmPB7cW"
+   },
+   "source": [
+    "### Grayscale <br />\n",
+    "Our grayscale (Gray) class will convert each of the  LAB images into a lightness level image (provided by Luke Melas at MIT). The class also returns the ogirinal image and the AB qauntized zone. The class is called in the LAB data_loader class"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "id": "pG3Ax_rP7yIV"
+   },
+   "outputs": [],
+   "source": [
+    "train_transforms = transforms.Compose([transforms.RandomResizedCrop(224), transforms.RandomHorizontalFlip()])\n",
+    "\n",
+    "val_transforms = transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224)])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {
+    "id": "dQ2Qofu9CP3V"
+   },
+   "outputs": [],
+   "source": [
+    "class Gray(datasets.ImageFolder):\n",
+    "    def __getitem__(self, index):\n",
+    "        path, target = self.imgs[index]\n",
+    "        \n",
+    "        img = self.loader(path)\n",
+    "\n",
+    "        if self.transform is not None:\n",
+    "            img_original = self.transform(img)\n",
+    "            img_original = np.asarray(img_original)\n",
+    "            img_lab = rgb2lab(img_original)\n",
+    "            img_lab = (img_lab + 128) / 255\n",
+    "            img_ab = img_lab[:, :, 1:3]\n",
+    "            img_ab = torch.from_numpy(img_ab.transpose((2, 0, 1))).float()\n",
+    "            img_original = rgb2gray(img_original)\n",
+    "            img_original = torch.from_numpy(img_original).unsqueeze(0).float()\n",
+    "        if self.target_transform is not None:\n",
+    "            target = self.target_transform(target)\n",
+    "        return (img_original, img_ab, target)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {
+    "id": "T8OuAnEwD6nV"
+   },
+   "outputs": [],
+   "source": [
+    "## builds our data loaders\n",
+    "class LAB():\n",
+    "  def __init__(self, train_directory, val_directory):\n",
+    "    # split training data\n",
+    "    train=Gray(train_directory,train_transforms)\n",
+    "    self.loader_train=DataLoader(train,  batch_size=15, shuffle=True)\n",
+    "\n",
+    "    # split testing data\n",
+    "    test=Gray(testing_directory,val_transforms)\n",
+    "    self.loader_test=DataLoader(train,batch_size=15, shuffle=False)\n",
+    "\n",
+    "  def give(self):\n",
+    "    train, load =  self.loader_train, self.loader_test\n",
+    "    return train, load\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {
+    "id": "9G3HSETzEDp7"
+   },
+   "outputs": [],
+   "source": [
+    "train_directory= os.path.join('.', 'images/train/')\n",
+    "testing_directory= os.path.join('.', 'images/val/')\n",
+    "\n",
+    "train_loader, val_loader = LAB(train_directory, testing_directory).give()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/"
+    },
+    "id": "cqTyHABcKhn7",
+    "outputId": "1ef32292-27b9-4534-9432-01cf1edc0ceb"
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Number of Batches in Training:  2667\n",
+      "\n",
+      "Training Data:\n",
+      "Dataset Gray\n",
+      "    Number of datapoints: 40000\n",
+      "    Root location: ./images/train/\n",
+      "    StandardTransform\n",
+      "Transform: Compose(\n",
+      "               RandomResizedCrop(size=(224, 224), scale=(0.08, 1.0), ratio=(0.75, 1.3333), interpolation=PIL.Image.BILINEAR)\n",
+      "               RandomHorizontalFlip(p=0.5)\n",
+      "           )\n",
+      "\n",
+      "Size of Each Image:  224\n"
+     ]
+    }
+   ],
+   "source": [
+    "print('Number of Batches in Training: ', len(train_loader))\n",
+    "\n",
+    "print('\\nTraining Data:')\n",
+    "print(train_loader.dataset)\n",
+    "\n",
+    "\n",
+    "print('\\nSize of Each Image: ', len(train_loader.dataset[0][0][0]))\n",
+    "input_n = len(train_loader.dataset[0][0][0])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "qyD69ItHCd98"
+   },
+   "source": [
+    "# Defining the Model and Helper Functions\n",
+    "Now that our data had been downloaded, transformed, and finally loaded, let us begin defining our model. First, we must define out helper function to help gage accuracy, or in the case of Colorization, display hallucinated images at random indexes in the testing dataset."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "3c7TnkpxDi5m"
+   },
+   "source": [
+    "### Helper Functions\n",
+    "The below class will be used to display the hallucinated images, the probability distribution of it's quantized zone (predicted AB values), the original image, and the original AB values"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "id": "XLpEUvXBZjiu"
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "N1hDOU2do45t"
+   },
+   "source": [
+    "## Here we define our model\n",
+    "We are not using class rebalancing below, just simply running through the model during training and then calculating the resulting color distribution. <br />\n",
+    "> * Richard Zhang et al. recomended the use of cross entropy loss to measure difference (after color probability layer) to account for differnces in the ab layer\n",
+    "> * Don't use softmax before cross entropy loss \n",
+    "  * Doing so could increases chance of overflow encounter\n",
+    "\n",
+    "### Sources\n",
+    "Understanding how PyTorch determines layer size\n",
+    "  * https://towardsdatascience.com/pytorch-layer-dimensions-what-sizes-should-they-be-and-why-4265a41e01fd\n",
+    "\n",
+    "\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {
+    "id": "zUc5QZbt4zl-"
+   },
+   "outputs": [],
+   "source": [
+    "class Model(nn.Module):\n",
+    "    def __init__(self):\n",
+    "        super(Model, self).__init__()\n",
+    "\n",
+    "    ## LIGHTNESS LEVEL LEARNERS\n",
+    "        self.layer1 = nn.Sequential(nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1, bias=True), nn.ReLU(),nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1, bias=True),nn.ReLU(), nn.BatchNorm2d(64))\n",
+    "\n",
+    "        self.layer2 = nn.Sequential(nn.Conv2d(64,128, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(),nn.Conv2d(128,128, kernel_size=3, stride=2, padding=1, bias=True),nn.ReLU(), nn.BatchNorm2d(128))\n",
+    "\n",
+    "        self.layer3 = nn.Sequential(nn.Conv2d(128,256, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(),nn.Conv2d(256,256,kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(),nn.Conv2d(256,256, kernel_size=3, stride=2, padding=1, bias=True),nn.ReLU(),nn.BatchNorm2d(256))\n",
+    "\n",
+    "        self.layer4 = nn.Sequential(nn.Conv2d(256,512, kernel_size=3, stride=1, padding=1, bias=True), nn.ReLU(),nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(), nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(),nn.BatchNorm2d(512))\n",
+    "\n",
+    "        self.layer5 = nn.Sequential(nn.Conv2d(512,512, kernel_size=3,dilation=2, stride=1, padding=2, bias=True),nn.ReLU(),nn.Conv2d(512, 512, kernel_size=3, dilation=2, stride=1, padding=2, bias=True),nn.ReLU(),nn.Conv2d(512,512 ,kernel_size=3,dilation=2, stride=1, padding=2, bias=True),nn.ReLU(),nn.BatchNorm2d(512))     \n",
+    "\n",
+    "        self.layer6 = nn.Sequential(nn.Conv2d(512,512, kernel_size=3,dilation=2, stride=1, padding=2, bias=True),nn.ReLU(),nn.Conv2d(512, 512, kernel_size=3, dilation=2, stride=1, padding=2, bias=True),nn.ReLU(),nn.Conv2d(512,512 ,kernel_size=3,dilation=2, stride=1, padding=2, bias=True),nn.ReLU(),nn.BatchNorm2d(512))\n",
+    "\n",
+    "        self.layer7 = nn.Sequential(nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(True),nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(True),nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(True),nn.BatchNorm2d(512))\n",
+    "        \n",
+    "        self.layer8 = nn.Sequential(nn.ConvTranspose2d(512, 256 ,kernel_size=4, stride=2, padding=1, bias=True),nn.ReLU(),nn.Conv2d(256,256, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU(),nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=True),nn.ReLU())\n",
+    "\n",
+    "#           model8=[nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1, bias=True),]\n",
+    "#         model8+=[nn.ReLU(True),]\n",
+    "#         model8+=[nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=True),]\n",
+    "#         model8+=[nn.ReLU(True),]\n",
+    "#         model8+=[nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=True),]\n",
+    "#         model8+=[nn.ReLU(True),]\n",
+    "        \n",
+    "    ## Predictions of AB values\n",
+    "#     nn.Conv2d(256, 313, kernel_size=1, stride=1, padding=0, bias=True),]\n",
+    "        self.prob = nn.Sequential(nn.ConvTranspose2d(256,313, kernel_size=1, stride=1, padding=0, bias=True),nn.ReLU())\n",
+    "\n",
+    "        self.model_out = nn.Conv2d(313, 2, kernel_size=1, padding=0, dilation=1, stride=1, bias=False)\n",
+    "\n",
+    "        self.softmax = nn.Softmax()\n",
+    "\n",
+    "        # # self.prob = nn.Conv2d()\n",
+    "\n",
+    "\n",
+    "\n",
+    "        \n",
+    "        self.upsample4 = nn.Upsample(scale_factor=4, mode='bilinear')\n",
+    "\n",
+    "\n",
+    "    def forward(self, x):\n",
+    "        temperature = 0.38\n",
+    "\n",
+    "        one = self.layer1(x)\n",
+    "        two = self.layer2(one)\n",
+    "        three = self.layer3(two)\n",
+    "        four = self.layer4(three)\n",
+    "        five = self.layer5(four)\n",
+    " \n",
+    "    \n",
+    "        # upward = self.layer5(self.layer4(self.layer3(self.layer2(temp))))\n",
+    "        dilate = self.layer8(self.layer7(self.layer6(five)))/temperature\n",
+    "        \n",
+    "        prob = self.prob(dilate)\n",
+    "        \n",
+    "\n",
+    "        image = self.softmax(self.upsample4(self.model_out(prob)))\n",
+    "\n",
+    "        \n",
+    "        return image\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {
+    "id": "oM3SpFYGIx7w"
+   },
+   "source": [
+    "# Train and Optimize our Model\n",
+    "Some info on computing a loss function –– https://neptune.ai/blog/pytorch-loss-functions\n",
+    "* Note: CrossEntropy Loss is best for computing error between 2 probability distributions and heavily penalizes high confidence"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {
+    "id": "yH1fZLI-o_jz"
+   },
+   "outputs": [],
+   "source": [
+    "def train(train_loader, net, criterion, optimizer, epoch):\n",
+    "    long_loss = []\n",
+    "\n",
+    "    for epoch in range(epochs):  # loop over the dataset multiple times\n",
+    "\n",
+    "\n",
+    "        running_loss = 0.0\n",
+    "        for i, (input_gray, input_ab, target)in enumerate(train_loader, 0):\n",
+    "          \n",
+    "          # move data to the GPU\n",
+    "            input_gray, input_ab, target = input_gray.cuda(), input_ab.cuda(), target.cuda()\n",
+    "#             print('iteration',i)\n",
+    "\n",
+    "            # forward and loss\n",
+    "            output_ab = net(input_gray)\n",
+    "\n",
+    "#             global temp\n",
+    "#             temp = input_ab\n",
+    "            target = input_ab.flatten()\n",
+    "            input =output_ab.flatten()\n",
+    "\n",
+    "\n",
+    "\n",
+    "            loss = criterion(input, target)\n",
+    "#             print('loss calculated')\n",
+    "\n",
+    "\n",
+    "            # backward and optimize –– zero the parameter gradients\n",
+    "#             print('training')\n",
+    "            optimizer.zero_grad()\n",
+    "            loss.backward()\n",
+    "            optimizer.step()\n",
+    "\n",
+    "            # print statistics\n",
+    "            long_loss.append(loss)\n",
+    "            running_loss += loss.item()\n",
+    "            if i % 2000 == 1999:    # print every 2000 mini-batches\n",
+    "                print('[%d, %5d] loss: %.3f' %\n",
+    "                    (epoch + 1, i + 1, running_loss / 2000))\n",
+    "                running_loss = 0.0\n",
+    "\n",
+    "    print('Finished Training')\n",
+    "    return long_loss\n",
+    "                               \n",
+    "                                               # target needs to be size NxNumClasses\n",
+    "                # labels needs to be size N\n",
+    "                    # Note: flatten both tensors in order to create N\n",
+    "            \n",
+    "#           target = input_ab.long().flatten().reshape([15,224*2, 224])[0]\n",
+    "#           input = output_ab.reshape([15,224*2, 224])[0]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "colab": {
+     "base_uri": "https://localhost:8080/",
+     "height": 358
+    },
+    "id": "v29Gh_TcK8QI",
+    "outputId": "6274c027-d1c1-43c3-f999-293c9f61e978"
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "/opt/conda/lib/python3.7/site-packages/torch/nn/functional.py:2479: UserWarning: Default upsampling behavior when mode=bilinear is changed to align_corners=False since 0.4.0. Please specify align_corners=True if the old behavior is desired. See the documentation of nn.Upsample for details.\n",
+      "  \"See the documentation of nn.Upsample for details.\".format(mode))\n",
+      "/opt/conda/lib/python3.7/site-packages/ipykernel_launcher.py:61: UserWarning: Implicit dimension choice for softmax has been deprecated. Change the call to include dim=X as an argument.\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[1,  2000] loss: 0.004\n"
+     ]
+    }
+   ],
+   "source": [
+    "colorizer = Model()\n",
+    "colorizer.cuda()\n",
+    "\n",
+    "criterion = nn.MSELoss()\n",
+    "optimizer = optim.SGD(colorizer.parameters(), lr=0.001, momentum=0.9)\n",
+    "epochs = 1\n",
+    "\n",
+    "\n",
+    "graph = train(train_loader, colorizer, criterion, optimizer,  epochs)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# temp.size()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# a = temp[0,0,:,:]\n",
+    "# a.size()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# a"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "accelerator": "GPU",
+  "colab": {
+   "collapsed_sections": [],
+   "name": "Image_Colorization.ipynb",
+   "provenance": []
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.6"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 1
+}
